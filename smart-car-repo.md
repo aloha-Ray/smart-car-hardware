@@ -2,27 +2,27 @@
 
 ### 一、前期硬件选型
 
-![物料](images/物料.png)
+<img src="images/物料.png" width="80%">
 
 ### 二、系统框图
 
-![系统框图](images/系统框图.png)
+<img src="images/系统框图.png" width="80%">
 
 ### 三、系统搭建以及测试
 
 #### 3.1组装42电机以及轮子
 
-![小车底盘](images/小车底盘.jpg)
+!<img src="images/小车底盘.jpg" width="80%">
 
 #### 3.2组装上层驱动
 
 将TMC2209固定至CNC shield V3，并将42步进电机与TMC2209电机驱动模块相连
 
-![上层驱动](images/上层驱动.jpg)
+<img src="images/上层驱动.jpg" width="80%">
 
 连接电池测试驱动模块，用万用表测量TMC2209模块的VREF，使用螺丝刀扭动螺丝，使VREF的值保持在0.9V左右，并小心静电击穿。
 
-![测量电压](images/测量电压.jpg)
+<img src="images/测量电压.jpg" width="80%">
 
 测试完毕后，使用铜柱将开发板固定好
 
@@ -53,7 +53,7 @@ static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, lof
         return -EFAULT;
     }
 
-    // 根据指令控制引脚的电压
+    // 根据指令控制引脚的电压S
     if (cmd == '1') {
         gpio_set_value(STEP_PIN, 1); // 输出高电平
     } else if (cmd == '0') {
@@ -140,8 +140,6 @@ git clone --depth=1 https://github.com/raspberrypi/linux.git
 ~~~
 
 下载完成，查看
-
-![1774423446978](C:\Users\86136\AppData\Roaming\Typora\typora-user-images\1774423446978.png)
 
 进入内核源码目录
 
