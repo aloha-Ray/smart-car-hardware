@@ -2,27 +2,27 @@
 
 ### 一、前期硬件选型
 
-![物料](images\物料.png)
+![物料](images/物料.png)
 
 ### 二、系统框图
 
-![1774420862974](C:\Users\86136\AppData\Roaming\Typora\typora-user-images\1774420862974.png)
+![系统框图](images/系统框图.png)
 
 ### 三、系统搭建以及测试
 
 #### 3.1组装42电机以及轮子
 
-![1774421444986](C:\Users\86136\AppData\Roaming\Typora\typora-user-images\1774421444986.png)
+![小车底盘](images/小车底盘.jpg)
 
 #### 3.2组装上层驱动
 
 将TMC2209固定至CNC shield V3，并将42步进电机与TMC2209电机驱动模块相连
 
-![1774421740245](C:\Users\86136\AppData\Roaming\Typora\typora-user-images\1774421740245.png)
+![上层驱动](images/上层驱动.jpg)
 
 连接电池测试驱动模块，用万用表测量TMC2209模块的VREF，使用螺丝刀扭动螺丝，使VREF的值保持在0.9V左右，并小心静电击穿。
 
-![1774422102214](C:\Users\86136\AppData\Roaming\Typora\typora-user-images\1774422102214.png)
+![测量电压](images/测量电压.jpg)
 
 测试完毕后，使用铜柱将开发板固定好
 
