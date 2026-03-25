@@ -2,7 +2,7 @@
 
 ### 一、前期硬件选型
 
-![1774420770963](C:\Users\86136\AppData\Roaming\Typora\typora-user-images\1774420770963.png)
+![物料](D:\car\smart-car-repo\images\物料.png)
 
 ### 二、系统框图
 
