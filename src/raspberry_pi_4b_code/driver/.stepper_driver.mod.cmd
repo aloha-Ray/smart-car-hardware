@@ -1,0 +1,1 @@
+savedcmd_/mnt/d/car/smart-car-repo/src/raspberry_pi_4b_code/driver/stepper_driver.mod := printf '%s\n'   stepper_driver.o | awk '!x[$$0]++ { print("/mnt/d/car/smart-car-repo/src/raspberry_pi_4b_code/driver/"$$0) }' > /mnt/d/car/smart-car-repo/src/raspberry_pi_4b_code/driver/stepper_driver.mod

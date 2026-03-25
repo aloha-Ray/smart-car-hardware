@@ -1,0 +1,1 @@
+savedcmd_/mnt/d/car/smart-car-repo/src/raspberry_pi_4b_code/driver/Module.symvers :=  scripts/mod/modpost -M -m -a      -o /mnt/d/car/smart-car-repo/src/raspberry_pi_4b_code/driver/Module.symvers -T /mnt/d/car/smart-car-repo/src/raspberry_pi_4b_code/driver/modules.order -i Module.symvers -e 
