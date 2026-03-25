@@ -2,7 +2,7 @@
 
 ### 一、前期硬件选型
 
-![物料](D:\car\smart-car-repo\images\物料.png)
+![物料](images\物料.png)
 
 ### 二、系统框图
 
