@@ -176,7 +176,7 @@ scp stepper_driver.ko ray@192.168:~
 
 #### 3.7 把树莓派当大脑，arduino当作小脑
 
-编写 Arduino “小脑”固件
+编写 Arduino “小脑”固件，使用串口通信，接受树莓派的指令，然后交由arduino来处理
 
 ~~~c++
 #include <AccelStepper.h>
