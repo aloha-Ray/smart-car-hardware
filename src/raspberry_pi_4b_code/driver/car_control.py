@@ -1,20 +1,33 @@
 import serial
+import serial.tools.list_ports  # 导入寻找端口的工具
 import time
 import sys
 import tty
 import termios
 
-# --- 1. 配置串口 ---
-# 请确保 Arduino 插在树莓派上，设备名通常是 /dev/ttyACM0
-SERIAL_PORT = '/dev/ttyACM0' 
+# --- 1. 自动寻找 Arduino 串口 ---
+def find_arduino():
+    print("正在寻找 Arduino...")
+    ports = serial.tools.list_ports.comports()
+    for p in ports:
+        if "ACM" in p.device or "USB" in p.device:
+            return p.device
+    return None
+
+SERIAL_PORT = find_arduino()
+
+if SERIAL_PORT is None:
+    print("❌ 找不到 Arduino！请检查 USB 线是否插好。")
+    sys.exit()
+
 BAUD_RATE = 115200
 
 try:
     ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
     time.sleep(2) # 等待 Arduino 重启
-    print(f"成功连接到 Arduino: {SERIAL_PORT}")
-except:
-    print("无法连接串口，请检查 USB 线或端口名！")
+    print(f"✅ 成功连接到底盘，当前端口: {SERIAL_PORT}")
+except Exception as e:
+    print(f"❌ 串口连接失败: {e}")
     sys.exit()
 
 # --- 2. 控制逻辑 ---
@@ -38,11 +51,11 @@ def getch():
 
 # --- 3. 运行循环 ---
 print("""
-控制说明:
+=== 小车驾驶舱已启动 ===
   W: 前进    S: 后退
   A: 左转    D: 右转
   Space: 停止  Q: 退出
----------------------------
+========================
 """)
 
 try:
@@ -72,4 +85,6 @@ try:
 except KeyboardInterrupt:
     send_cmd(0, 0, 0, 0)
 finally:
-    ser.close()
+    if ser.is_open:
+        ser.close()
+    print("\n串口已安全关闭。")
