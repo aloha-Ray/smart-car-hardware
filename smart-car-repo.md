@@ -179,121 +179,202 @@ scp stepper_driver.ko ray@192.168:~
 编写 Arduino “小脑”固件，使用串口通信，接受树莓派的指令，然后交由arduino来处理
 
 ~~~c++
-#include <AccelStepper.h>
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/gpio.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
 
-// --- CNC Shield V3 引脚定义 (4独立轴) ---
-#define EN_PIN 8  // 全部驱动的全局使能引脚
+#define DRIVER_NAME "stepper_gpio_driver"
+// 假设将树莓派的 GPIO 17 引脚连接到 CNC Shield V3 对应的 STEP 引脚
+#define STEP_PIN 17 
 
-// 1. 左前轮 (接入 X 轴插槽)
-#define FL_STEP 2
-#define FL_DIR  5
-// 2. 左后轮 (接入 Y 轴插槽)
-#define RL_STEP 3
-#define RL_DIR  6
-// 3. 右前轮 (接入 Z 轴插槽)
-#define FR_STEP 4
-#define FR_DIR  7
-// 4. 右后轮 (接入 A 轴插槽)
-#define RR_STEP 12 
-#define RR_DIR  13 
+static int major_number;
 
-// --- 创建 4 个独立电机对象 ---
-AccelStepper motorFL(1, FL_STEP, FL_DIR);  
-AccelStepper motorRL(1, RL_STEP, RL_DIR); 
-AccelStepper motorFR(1, FR_STEP, FR_DIR); 
-AccelStepper motorRR(1, RR_STEP, RR_DIR); 
-
-String inputString = "";
-bool stringComplete = false;
-
-void setup() {
-  Serial.begin(115200);
-  
-  pinMode(EN_PIN, OUTPUT);
-  digitalWrite(EN_PIN, LOW); // 激活所有电机
-
-  // --- 统一配置 4 个电机的参数 ---
-  AccelStepper* motors[] = {&motorFL, &motorRL, &motorFR, &motorRR};
-  for (int i = 0; i < 4; i++) {
-    motors[i]->setMaxSpeed(2000.0);    // 最大速度
-    motors[i]->setAcceleration(800.0); // 加速度 (数值越小起步越柔和，TMC2209 可以适当调高)
-  }
-  
-  Serial.println("四驱静音小脑已启动...");
-  Serial.println("指令格式: 左前,左后,右前,右后 (例如: 500,500,500,500)");
-}
-
-void loop() {
-  if (stringComplete) {
-    parseCommand(inputString);
-    inputString = "";       
-    stringComplete = false; 
-  }
-
-  // 4 个轮子疯狂运转 (必须放在无阻塞的 loop 中)
-  motorFL.runSpeed();
-  motorRL.runSpeed();
-  motorFR.runSpeed();
-  motorRR.runSpeed();
-}
-
-void serialEvent() {
-  while (Serial.available()) {
-    char inChar = (char)Serial.read();
-    if (inChar == '\n') {
-      stringComplete = true;
-    } else {
-      inputString += inChar; 
+// 这个函数负责接收外部传来的指令（1或0），并控制引脚电平
+static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset) {
+    char cmd;
+    // 将应用层（比如你以后写的 Python 脚本）发来的指令拷贝进内核
+    if (copy_from_user(&cmd, buffer, 1)) {
+        return -EFAULT;
     }
-  }
+
+    // 判断指令并操作底层硬件
+    if (cmd == '1') {
+        gpio_set_value(STEP_PIN, 1); // 输出高电平
+    } else if (cmd == '0') {
+        gpio_set_value(STEP_PIN, 0); // 输出低电平
+    }
+    return len;
 }
 
-// --- 拆解 4 个数字的指令 ---
-void parseCommand(String cmd) {
-  int comma1 = cmd.indexOf(',');
-  int comma2 = cmd.indexOf(',', comma1 + 1);
-  int comma3 = cmd.indexOf(',', comma2 + 1);
+// 绑定设备的文件操作接口
+static struct file_operations fops = {
+    .write = dev_write,
+};
 
-  // 确保找到了 3 个逗号，格式才算正确
-  if (comma1 != -1 && comma2 != -1 && comma3 != -1) { 
-    float flSpeed = cmd.substring(0, comma1).toFloat();
-    float rlSpeed = cmd.substring(comma1 + 1, comma2).toFloat();
-    float frSpeed = cmd.substring(comma2 + 1, comma3).toFloat();
-    float rrSpeed = cmd.substring(comma3 + 1).toFloat();
+// 驱动加载时的初始化动作
+static int __init stepper_driver_init(void) {
+    printk(KERN_INFO "Stepper Driver: 正在初始化...\n");
 
-    motorFL.setSpeed(flSpeed);
-    motorRL.setSpeed(rlSpeed);
-    motorFR.setSpeed(frSpeed);
-    motorRR.setSpeed(rrSpeed);
-    
-    Serial.print("已执行 -> ");
-    Serial.print(flSpeed); Serial.print(" | ");
-    Serial.print(rlSpeed); Serial.print(" | ");
-    Serial.print(frSpeed); Serial.print(" | ");
-    Serial.println(rrSpeed);
-  } else {
-    Serial.println("错误！格式必须是四个数字: FL,RL,FR,RR");
-  }
+    // 检查并申请树莓派的 GPIO 引脚
+    if (!gpio_is_valid(STEP_PIN)) {
+        printk(KERN_ERR "Stepper Driver: 无效的 GPIO 引脚\n");
+        return -ENODEV;
+    }
+    gpio_request(STEP_PIN, "sysfs");
+    gpio_direction_output(STEP_PIN, 0); // 初始状态设为低电平
+
+    // 注册这个字符设备驱动
+    major_number = register_chrdev(0, DRIVER_NAME, &fops);
+    if (major_number < 0) {
+        printk(KERN_ERR "Stepper Driver: 注册主设备号失败\n");
+        gpio_free(STEP_PIN);
+        return major_number;
+    }
+    printk(KERN_INFO "Stepper Driver: 注册成功，分配的主设备号是 %d\n", major_number);
+    return 0;
 }
+
+// 驱动卸载时的清理动作
+static void __exit stepper_driver_exit(void) {
+    unregister_chrdev(major_number, DRIVER_NAME);
+    gpio_set_value(STEP_PIN, 0); // 安全起见，卸载时拉低电平
+    gpio_free(STEP_PIN);         // 释放对该引脚的控制权
+    printk(KERN_INFO "Stepper Driver: 驱动已卸载。\n");
+}
+
+module_init(stepper_driver_init);
+module_exit(stepper_driver_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Your Name");
+MODULE_DESCRIPTION("树莓派底层步进电机 GPIO 驱动");
 ~~~
 
 树莓派端
 
 ~~~python
 import serial
+import serial.tools.list_ports
 import time
+import sys
+import tty
+import termios
 
-# 1. 直接打开系统自带的串口设备（极其简单！）
-ser = serial.Serial('/dev/ttyACM0', 115200)
-time.sleep(2) # 等待 Arduino 重启准备好
+# ==========================================
+# 1. 自动寻找 Arduino 串口
+# ==========================================
+def find_arduino():
+    print("正在寻找 Arduino 的大脑...")
+    ports = serial.tools.list_ports.comports()
+    for p in ports:
+        # 匹配常见的 Arduino 串口名称
+        if "ACM" in p.device or "USB" in p.device:
+            return p.device
+    return None
 
-# 2. 给 Arduino 下达“全速前进”指令
-print("小车前进！")
-ser.write(b"500,500\n") 
-time.sleep(3) # 让小车跑 3 秒
+SERIAL_PORT = find_arduino()
 
-# 3. 下达“刹车”指令
-print("小车停止！")
-ser.write(b"0,0\n")
+if SERIAL_PORT is None:
+    print("❌ 找不到 Arduino！请检查 USB 线是否插好。")
+    sys.exit()
+
+BAUD_RATE = 115200
+
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2) # 等待 Arduino 重启就绪
+    print(f"✅ 成功连接到底盘，当前端口: {SERIAL_PORT}")
+except Exception as e:
+    print(f"❌ 串口连接失败: {e}")
+    sys.exit()
+
+# ==========================================
+# 2. 控制逻辑与基础参数
+# ==========================================
+SPEED = 800  # 设定标准速度
+
+def send_cmd(fl, rl, fr, rr):
+    """格式化并发送 4 个轮子的速度指令给 Arduino"""
+    command = f"{fl},{rl},{fr},{rr}\n"
+    ser.write(command.encode('utf-8'))
+
+def getch():
+    """实时读取键盘按键（阻塞式读取，无需按回车）"""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return ch
+
+# ==========================================
+# 3. 运行主循环 (驾驶舱)
+# ==========================================
+print("""
+=== 🏎️ 树莓派四驱小车驾驶舱已启动 ===
+  【日常行驶】(长按行驶，松开1秒后自动急刹)
+    W: 直线前进    S: 直线后退
+    A: 丝滑左转    D: 丝滑右转
+  
+  【极限机动】(木地板上阻力较大，会伴随震动声)
+    Q: 原地左掉头  E: 原地右掉头
+  
+  【安全控制】
+    Space (空格): 紧急手动刹车
+    X: 安全退出程序
+========================================
+""")
+
+try:
+    while True:
+        key = getch().lower()
+        
+        # 设定差速转弯时的慢速比例 (0.3 代表内侧轮子只出 30% 的力气)
+        SLOW_SPEED = int(SPEED * 0.5) 
+
+        if key == 'w':
+            print("↑ 直线前进")
+            send_cmd(SPEED, SPEED, SPEED, SPEED)
+            
+        elif key == 's':
+            print("↓ 直线后退")
+            send_cmd(-SPEED, -SPEED, -SPEED, -SPEED)
+            
+        elif key == 'a':
+            print("↖ 丝滑左转 (左轮慢，右轮快)")
+            send_cmd(SLOW_SPEED, SLOW_SPEED, SPEED, SPEED)
+            
+        elif key == 'd':
+            print("↗ 丝滑右转 (左轮快，右轮慢)")
+            send_cmd(SPEED, SPEED, SLOW_SPEED, SLOW_SPEED)
+            
+        elif key == 'q':
+            print("🔄 原地左死角掉头")
+            send_cmd(-SPEED, -SPEED, SPEED, SPEED)
+            
+        elif key == 'e':
+            print("🔄 原地右死角掉头")
+            send_cmd(SPEED, SPEED, -SPEED, -SPEED)
+            
+        elif key == ' ':
+            print("█ 紧急手动刹车")
+            send_cmd(0, 0, 0, 0)
+            
+        elif key == 'x': 
+            print("退出程序...")
+            send_cmd(0, 0, 0, 0)
+            break
+            
+except KeyboardInterrupt:
+    # 防止按 Ctrl+C 强制退出时小车失控
+    send_cmd(0, 0, 0, 0)
+finally:
+    if ser.is_open:
+        ser.close()
+    print("\n✅ 串口已安全关闭，系统离线。")
 ~~~
 
