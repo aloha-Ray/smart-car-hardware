@@ -390,7 +390,7 @@ finally:
 
 硬件选型：树莓派csi摄像头及摄像头支架
 
-抓取 OV5647 的画面，并将其转换为可以通过浏览器访问的视频流
+摄像头测试程序
 
 ~~~~c
 #include <stdio.h>
@@ -431,4 +431,65 @@ int main() {
     return 0;
 }
 ~~~~
+
+编写 Web 图传核心代码
+
+~~~~python
+import cv2
+from flask import Flask, Response, render_template_string
+
+app = Flask(__name__)
+
+# 初始化摄像头
+# 对于树莓派 4B + OV5647，推荐 640x480 以保证图传实时性
+camera = cv2.VideoCapture(0)
+camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+def generate_frames():
+    while True:
+        success, frame = camera.read()
+        if not success:
+            break
+        else:
+            # 转换为 JPEG 格式，降低质量参数(quality)可以进一步减少延迟
+            ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            frame = buffer.tobytes()
+            # 使用 MJPEG 协议推送
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+@app.route('/')
+def index():
+    # 这里直接嵌入 HTML，后续你可以把之前学的 Vue.js 前端集成进来
+    return render_template_string("""
+        <html>
+            <head>
+                <title>Smart Car Dashboard</title>
+                <style>
+                    body { background: #222; color: white; text-align: center; font-family: sans-serif; }
+                    .stream-container { margin-top: 20px; }
+                    img { border: 3px solid #444; border-radius: 10px; width: 80%; max-width: 800px; }
+                </style>
+            </head>
+            <body>
+                <h1>智能小车 - 实时图传</h1>
+                <div class="stream-container">
+                    <img src="{{ url_for('video_feed') }}">
+                </div>
+                <p>OV5647 摄像头已就绪</p>
+            </body>
+        </html>
+    """)
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+if __name__ == '__main__':
+    # 监听所有网卡，5000 端口
+    app.run(host='0.0.0.0', port=5000, threaded=True)
+~~~~
+
+在 Windows 10 的浏览器中输入 `http:192.168.x.x:5000`
 
