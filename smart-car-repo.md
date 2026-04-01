@@ -389,3 +389,46 @@ finally:
 #### 4.1 摄像头驱动
 
 硬件选型：树莓派csi摄像头及摄像头支架
+
+抓取 OV5647 的画面，并将其转换为可以通过浏览器访问的视频流
+
+~~~~c
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/videodev2.h>
+
+int main() {
+    // 尝试打开默认的摄像头设备节点
+    int fd = open("/dev/video0", O_RDWR);
+    if (fd == -1) {
+        perror("Error: 无法打开摄像头设备 /dev/video0");
+        return 1;
+    }
+
+    // 查询摄像头能力/属性
+    struct v4l2_capability cap;
+    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == -1) {
+        perror("Error: 无法查询设备属性");
+        close(fd);
+        return 1;
+    }
+
+    printf("==============================\n");
+    printf("成功连接 OV5647 (或默认摄像头)!\n");
+    printf("驱动程序: %s\n", cap.driver);
+    printf("设备名称: %s\n", cap.card);
+    printf("总线信息: %s\n", cap.bus_info);
+    printf("版本号: %u.%u.%u\n", 
+            (cap.version >> 16) & 0xFF, 
+            (cap.version >> 8) & 0xFF, 
+            cap.version & 0xFF);
+    printf("==============================\n");
+
+    close(fd);
+    return 0;
+}
+~~~~
+
