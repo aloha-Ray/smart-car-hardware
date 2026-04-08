@@ -33,8 +33,9 @@ if SERIAL_PORT:
     except Exception as e:
         print(f"❌ 串口连接失败: {e}")
 
-SPEED = 800
-SLOW_SPEED = int(SPEED * 0.5)
+# 🚀 速度调优：如果觉得追得慢，可以把 800 改为 1000-1200
+SPEED = 900 
+SLOW_SPEED = int(SPEED * 0.4) # 降低内侧轮转速，使转向更平滑
 
 def send_cmd(fl, rl, fr, rr):
     command = f"{fl},{rl},{fr},{rr}\n"
@@ -65,7 +66,7 @@ def chassis_control_loop():
                 send_cmd(0, 0, 0, 0)
                 
         last_state = current
-        time.sleep(0.1)
+        time.sleep(0.05) # 提高底盘指令响应频率
 
 threading.Thread(target=chassis_control_loop, daemon=True).start()
 
@@ -73,88 +74,59 @@ threading.Thread(target=chassis_control_loop, daemon=True).start()
 # 3. 摄像头抓取线程 (针对 CSI 优化)
 # ==========================================
 latest_frame = None
-RTMP_URL = "" # 如需推流到斗鱼请填入
+RTMP_URL = "" 
 
 def camera_and_push_loop():
     global latest_frame
-    # 树莓派排线摄像头必须带 CAP_V4L2
     camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
-    
-    # 💡 修复绿屏关键：仅设置宽高，不设置 FOURCC 格式
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    camera.set(cv2.CAP_PROP_FPS, 15) 
-
-    pipe = None
-    if RTMP_URL:
-        command = [
-            'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
-            '-pix_fmt', 'bgr24', '-s', '640x480', '-r', '15',
-            '-i', '-', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-            '-preset', 'ultrafast', '-f', 'flv', RTMP_URL
-        ]
-        try:
-            pipe = subprocess.Popen(command, stdin=subprocess.PIPE)
-            print("🚀 直播推流引擎启动成功！")
-        except: pass
+    camera.set(cv2.CAP_PROP_FPS, 20) # 尝试提升采集帧率
 
     while True:
         try:
             success, frame = camera.read()
             if success and frame is not None:
                 latest_frame = frame
-                if pipe:
-                    try: pipe.stdin.write(frame.tobytes())
-                    except: pass
         except Exception:
-            pass # 跳过坏帧
-        time.sleep(0.02)
+            pass 
+        time.sleep(0.01)
 
 threading.Thread(target=camera_and_push_loop, daemon=True).start()
 
 # ==========================================
-# 4. 🧠 YOLO AI 跟随线程 (增强加载逻辑)
+# 4. 🧠 终极灵敏版 YOLO AI 跟随线程
 # ==========================================
 auto_follow_mode = False
 
 def ai_tracking_loop():
     global latest_frame, car_state, auto_follow_mode
     
-    # 💡 尝试两个路径，确保模型能被找到
     path_local = os.path.join(os.path.dirname(__file__), 'yolov8n.pt')
     path_safe = '/home/ray/yolov8n.pt'
-    
     model_path = path_local if os.path.exists(path_local) else path_safe
     
     print(f"⏳ 正在尝试加载模型: {model_path}")
-    
     try:
-        if not os.path.exists(model_path):
-            print(f"❌ 找不到模型文件！请确保执行了 scp 传输。")
-            return
-        
-        # 校验文件大小，防止 Ran out of input (空文件报错)
-        if os.path.getsize(model_path) < 5000000:
-            print(f"⚠️ 警告：{model_path} 文件太小，可能已损坏。建议重新上传！")
-            return
-
         model = YOLO(model_path) 
         print("✅ YOLO AI 模型加载完毕！视觉大脑已上线！")
     except Exception as e:
-        print(f"❌ 严重错误：YOLO 加载崩溃，原因：{e}")
+        print(f"❌ 严重错误：YOLO 加载失败: {e}")
         return
 
     while True:
+        # 如果没开启 AI 或没画面，减少 CPU 占用
         if not auto_follow_mode or latest_frame is None:
-            time.sleep(0.2)
+            time.sleep(0.1)
             continue
 
         try:
-            frame = latest_frame.copy()
-            results = model.predict(frame, classes=[0], imgsz=320, verbose=False)
+            # 🚀 优化：使用 imgsz=160 极大提速，只识别 Person (class 0)
+            results = model.predict(latest_frame, classes=[0], imgsz=160, verbose=False)
             
             boxes = results[0].boxes
             if len(boxes) > 0:
+                # 寻找画面中面积最大的人
                 max_area = 0
                 best_box = None
                 for box in boxes:
@@ -169,17 +141,26 @@ def ai_tracking_loop():
                 frame_area = 640 * 480
                 area_ratio = max_area / frame_area
 
-                if cx < 640 * 0.35:     car_state = 'a'
-                elif cx > 640 * 0.65:   car_state = 'd'
+                # 🚀 激进控制逻辑调优
+                if cx < 640 * 0.42:     # 转向触发点更灵敏
+                    car_state = 'a'
+                elif cx > 640 * 0.58:   
+                    car_state = 'd'
                 else:
-                    if area_ratio < 0.15: car_state = 'w'
-                    elif area_ratio > 0.40: car_state = 's'
-                    else: car_state = 'stop'
+                    # 距离判断：离得稍远(area_ratio小)就追，离得近就停或撤
+                    if area_ratio < 0.25:   # 只要你稍微退后一点，它就追
+                        car_state = 'w'
+                    elif area_ratio > 0.55: # 你冲向它，它会后退
+                        car_state = 's'
+                    else:
+                        car_state = 'stop'
             else:
-                car_state = 'stop'
+                car_state = 'stop' 
         except Exception:
             pass
-        time.sleep(0.2) 
+        
+        # 🚀 决策频率调优：极短休眠，让判断几乎不间断
+        time.sleep(0.01) 
 
 threading.Thread(target=ai_tracking_loop, daemon=True).start()
 
@@ -190,36 +171,38 @@ def generate_frames():
     global latest_frame
     while True:
         if latest_frame is not None:
-            ret, buffer = cv2.imencode('.jpg', latest_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            # 网页预览图传质量稍微降低，给 AI 腾出带宽
+            ret, buffer = cv2.imencode('.jpg', latest_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
             yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-        time.sleep(0.05)
+        time.sleep(0.06)
 
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>YOLO 智能战车</title>
+    <title>AI 智能战车调优版</title>
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
     <style>
-        body { background: #222; color: white; text-align: center; font-family: sans-serif; margin: 0; padding: 20px; }
-        img { border: 3px solid #555; border-radius: 8px; width: 100%; max-width: 640px; }
+        body { background: #1a1a1a; color: white; text-align: center; font-family: sans-serif; margin: 0; padding: 20px; }
+        img { border: 3px solid #9b59b6; border-radius: 8px; width: 100%; max-width: 600px; }
         .controls { display: grid; grid-template-columns: repeat(3, 90px); gap: 10px; justify-content: center; margin-top: 20px;}
-        .btn { background-color: #4CAF50; border: none; color: white; padding: 15px 0; font-size: 16px; font-weight: bold; border-radius: 10px; touch-action: none; }
-        .btn-stop { background-color: #d9534f; }
-        .btn-ai { background-color: #9b59b6; grid-column: span 3; font-size: 18px; margin-top: 10px;}
+        .btn { background-color: #444; border: none; color: white; padding: 15px 0; font-size: 16px; font-weight: bold; border-radius: 10px; touch-action: none; cursor: pointer;}
+        .btn:active { background-color: #666; }
+        .btn-ai { background-color: #9b59b6; grid-column: span 3; font-size: 18px; margin-top: 10px; animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.8; } 100% { opacity: 1; } }
     </style>
 </head>
 <body>
-    <h2>🤖 YOLO 自动跟随战车</h2>
+    <h2 style="color: #9b59b6;">⚡ 极速跟随模式 ⚡</h2>
     <div><img src="/video_feed"></div>
     <div class="controls">
-        <button class="btn" onmousedown="sendCommand('q')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('q')" ontouchend="sendCommand('stop')">左掉头</button>
-        <button class="btn" onmousedown="sendCommand('w')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('w')" ontouchend="sendCommand('stop')">前进</button>
-        <button class="btn" onmousedown="sendCommand('e')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('e')" ontouchend="sendCommand('stop')">右掉头</button>
-        <button class="btn" onmousedown="sendCommand('a')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('a')" ontouchend="sendCommand('stop')">左转</button>
-        <button class="btn btn-stop" onmousedown="sendCommand('stop')" ontouchstart="sendCommand('stop')">刹车</button>
-        <button class="btn" onmousedown="sendCommand('d')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('d')" ontouchend="sendCommand('stop')">右转</button>
-        <button class="btn btn-ai" id="ai-btn" onclick="toggleAI()">🚀 开启 AI 跟随</button>
+        <button class="btn" onmousedown="sendCommand('q')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('q')" ontouchend="sendCommand('stop')">左旋</button>
+        <button class="btn" onmousedown="sendCommand('w')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('w')" ontouchend="sendCommand('stop')">前</button>
+        <button class="btn" onmousedown="sendCommand('e')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('e')" ontouchend="sendCommand('stop')">右旋</button>
+        <button class="btn" onmousedown="sendCommand('a')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('a')" ontouchend="sendCommand('stop')">左</button>
+        <button class="btn" style="background:#d9534f;" onmousedown="sendCommand('stop')">停</button>
+        <button class="btn" onmousedown="sendCommand('d')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('d')" ontouchend="sendCommand('stop')">右</button>
+        <button class="btn" id="ai-btn" class="btn-ai" style="background:#9b59b6;grid-column: span 3;padding:20px 0;" onclick="toggleAI()">🚀 启动 视觉跟随大脑</button>
     </div>
     <script>
         let isAI = false;
@@ -227,10 +210,10 @@ HTML_TEMPLATE = '''
             isAI = !isAI;
             const btn = document.getElementById('ai-btn');
             if (isAI) {
-                btn.innerHTML = '🛑 停止自动跟随'; btn.style.backgroundColor = '#e74c3c';
+                btn.innerHTML = '🛑 停止视觉跟随'; btn.style.backgroundColor = '#e74c3c';
                 fetch('/action?cmd=ai_on');
             } else {
-                btn.innerHTML = '🚀 开启 AI 跟随'; btn.style.backgroundColor = '#9b59b6';
+                btn.innerHTML = '🚀 启动 视觉跟随大脑'; btn.style.backgroundColor = '#9b59b6';
                 fetch('/action?cmd=ai_off');
             }
         }
@@ -259,4 +242,5 @@ def handle_action():
     return "OK", 200
 
 if __name__ == '__main__':
+    # threaded=True 开启多线程模式提高并发
     app.run(host='0.0.0.0', port=5000, threaded=True, debug=False)
