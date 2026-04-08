@@ -3,9 +3,10 @@ from flask import Flask, Response, request, render_template_string
 import serial
 import serial.tools.list_ports
 import time
-import sys
 import threading
 import subprocess
+import os
+from ultralytics import YOLO
 
 app = Flask(__name__)
 
@@ -41,18 +42,17 @@ def send_cmd(fl, rl, fr, rr):
         ser.write(command.encode('utf-8'))
 
 # ==========================================
-# 2. 核心：独立底盘控制线程
+# 2. 独立底盘控制线程
 # ==========================================
 car_state = 'stop'
 
 def chassis_control_loop():
     global car_state
     last_state = None
-    
     while True:
         current = car_state
         if current != last_state:
-            print(f"🚗 网页指令更新: {current}")
+            print(f"🚗 状态更新: {current}")
             
         if current == 'w': send_cmd(SPEED, SPEED, SPEED, SPEED)
         elif current == 's': send_cmd(-SPEED, -SPEED, -SPEED, -SPEED)
@@ -67,23 +67,23 @@ def chassis_control_loop():
         last_state = current
         time.sleep(0.1)
 
-control_thread = threading.Thread(target=chassis_control_loop, daemon=True)
-control_thread.start()
+threading.Thread(target=chassis_control_loop, daemon=True).start()
 
 # ==========================================
-# 3. 优化版：全局读图与 FFmpeg 斗鱼推流
+# 3. 摄像头抓取线程 (针对 CSI 优化)
 # ==========================================
 latest_frame = None
-
-# 已填入你的斗鱼推流地址
-RTMP_URL = "rtmp://sendhw3a.douyu.com/live/12827428rqZYeFQa?dyPRI=0&noforward=1&origin=hw&record=flv&roirecognition=0&stemp_id=12898962&tw=0&wm=0&wsSecret=ab56d3e28af0556cfd59a780538c07f1&wsSeek=off&wsTime=69d340fb" 
+RTMP_URL = "" # 如需推流到斗鱼请填入
 
 def camera_and_push_loop():
     global latest_frame
+    # 树莓派排线摄像头必须带 CAP_V4L2
     camera = cv2.VideoCapture(0, cv2.CAP_V4L2)
+    
+    # 💡 修复绿屏关键：仅设置宽高，不设置 FOURCC 格式
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    camera.set(cv2.CAP_PROP_FPS, 15) # 降低到15帧，释放CPU算力保证控制不卡顿
+    camera.set(cv2.CAP_PROP_FPS, 15) 
 
     pipe = None
     if RTMP_URL:
@@ -93,77 +93,150 @@ def camera_and_push_loop():
             '-i', '-', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
             '-preset', 'ultrafast', '-f', 'flv', RTMP_URL
         ]
-        print("🚀 正在启动斗鱼直播推流...")
         try:
             pipe = subprocess.Popen(command, stdin=subprocess.PIPE)
-        except Exception as e:
-            print(f"推流组件启动失败: {e}")
+            print("🚀 直播推流引擎启动成功！")
+        except: pass
 
     while True:
-        success, frame = camera.read()
-        if success:
-            latest_frame = frame
-            if pipe:
-                try:
-                    pipe.stdin.write(frame.tobytes())
-                except Exception as e:
-                    pass
+        try:
+            success, frame = camera.read()
+            if success and frame is not None:
+                latest_frame = frame
+                if pipe:
+                    try: pipe.stdin.write(frame.tobytes())
+                    except: pass
+        except Exception:
+            pass # 跳过坏帧
         time.sleep(0.02)
 
 threading.Thread(target=camera_and_push_loop, daemon=True).start()
 
+# ==========================================
+# 4. 🧠 YOLO AI 跟随线程 (增强加载逻辑)
+# ==========================================
+auto_follow_mode = False
+
+def ai_tracking_loop():
+    global latest_frame, car_state, auto_follow_mode
+    
+    # 💡 尝试两个路径，确保模型能被找到
+    path_local = os.path.join(os.path.dirname(__file__), 'yolov8n.pt')
+    path_safe = '/home/ray/yolov8n.pt'
+    
+    model_path = path_local if os.path.exists(path_local) else path_safe
+    
+    print(f"⏳ 正在尝试加载模型: {model_path}")
+    
+    try:
+        if not os.path.exists(model_path):
+            print(f"❌ 找不到模型文件！请确保执行了 scp 传输。")
+            return
+        
+        # 校验文件大小，防止 Ran out of input (空文件报错)
+        if os.path.getsize(model_path) < 5000000:
+            print(f"⚠️ 警告：{model_path} 文件太小，可能已损坏。建议重新上传！")
+            return
+
+        model = YOLO(model_path) 
+        print("✅ YOLO AI 模型加载完毕！视觉大脑已上线！")
+    except Exception as e:
+        print(f"❌ 严重错误：YOLO 加载崩溃，原因：{e}")
+        return
+
+    while True:
+        if not auto_follow_mode or latest_frame is None:
+            time.sleep(0.2)
+            continue
+
+        try:
+            frame = latest_frame.copy()
+            results = model.predict(frame, classes=[0], imgsz=320, verbose=False)
+            
+            boxes = results[0].boxes
+            if len(boxes) > 0:
+                max_area = 0
+                best_box = None
+                for box in boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    area = (x2 - x1) * (y2 - y1)
+                    if area > max_area:
+                        max_area = area
+                        best_box = [x1, y1, x2, y2]
+                
+                x1, y1, x2, y2 = best_box
+                cx = (x1 + x2) / 2
+                frame_area = 640 * 480
+                area_ratio = max_area / frame_area
+
+                if cx < 640 * 0.35:     car_state = 'a'
+                elif cx > 640 * 0.65:   car_state = 'd'
+                else:
+                    if area_ratio < 0.15: car_state = 'w'
+                    elif area_ratio > 0.40: car_state = 's'
+                    else: car_state = 'stop'
+            else:
+                car_state = 'stop'
+        except Exception:
+            pass
+        time.sleep(0.2) 
+
+threading.Thread(target=ai_tracking_loop, daemon=True).start()
+
+# ==========================================
+# 5. Flask Web Server
+# ==========================================
 def generate_frames():
     global latest_frame
     while True:
         if latest_frame is not None:
             ret, buffer = cv2.imencode('.jpg', latest_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         time.sleep(0.05)
 
-# ==========================================
-# 4. 前端 Web 页面
-# ==========================================
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>智能小车 Web 控制台</title>
+    <title>YOLO 智能战车</title>
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
     <style>
         body { background: #222; color: white; text-align: center; font-family: sans-serif; margin: 0; padding: 20px; }
-        .video-container { margin-bottom: 20px; }
         img { border: 3px solid #555; border-radius: 8px; width: 100%; max-width: 640px; }
         .controls { display: grid; grid-template-columns: repeat(3, 90px); gap: 10px; justify-content: center; margin-top: 20px;}
-        .btn { background-color: #4CAF50; border: none; color: white; padding: 15px 0; font-size: 16px; font-weight: bold; border-radius: 10px; cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: none; }
-        .btn:active { background-color: #3e8e41; }
-        .btn-pivot { background-color: #f39c12; }
-        .btn-pivot:active { background-color: #e67e22; }
+        .btn { background-color: #4CAF50; border: none; color: white; padding: 15px 0; font-size: 16px; font-weight: bold; border-radius: 10px; touch-action: none; }
         .btn-stop { background-color: #d9534f; }
-        .empty { visibility: hidden; }
+        .btn-ai { background-color: #9b59b6; grid-column: span 3; font-size: 18px; margin-top: 10px;}
     </style>
 </head>
 <body>
-    <h2>🏎️ 树莓派斗鱼云直播车</h2>
-    <div class="video-container"><img src="/video_feed"></div>
+    <h2>🤖 YOLO 自动跟随战车</h2>
+    <div><img src="/video_feed"></div>
     <div class="controls">
-        <button class="btn btn-pivot" onmousedown="sendCommand('q')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('q')" ontouchend="sendCommand('stop')" oncontextmenu="return false;">左掉头</button>
-        <button class="btn" onmousedown="sendCommand('w')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('w')" ontouchend="sendCommand('stop')" oncontextmenu="return false;">前进</button>
-        <button class="btn btn-pivot" onmousedown="sendCommand('e')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('e')" ontouchend="sendCommand('stop')" oncontextmenu="return false;">右掉头</button>
-        
-        <button class="btn" onmousedown="sendCommand('a')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('a')" ontouchend="sendCommand('stop')" oncontextmenu="return false;">左转</button>
-        <button class="btn btn-stop" onmousedown="sendCommand('stop')" ontouchstart="sendCommand('stop')" oncontextmenu="return false;">紧急刹车</button>
-        <button class="btn" onmousedown="sendCommand('d')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('d')" ontouchend="sendCommand('stop')" oncontextmenu="return false;">右转</button>
-        
-        <div class="empty"></div>
-        <button class="btn" onmousedown="sendCommand('s')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('s')" ontouchend="sendCommand('stop')" oncontextmenu="return false;">后退</button>
-        <div class="empty"></div>
+        <button class="btn" onmousedown="sendCommand('q')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('q')" ontouchend="sendCommand('stop')">左掉头</button>
+        <button class="btn" onmousedown="sendCommand('w')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('w')" ontouchend="sendCommand('stop')">前进</button>
+        <button class="btn" onmousedown="sendCommand('e')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('e')" ontouchend="sendCommand('stop')">右掉头</button>
+        <button class="btn" onmousedown="sendCommand('a')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('a')" ontouchend="sendCommand('stop')">左转</button>
+        <button class="btn btn-stop" onmousedown="sendCommand('stop')" ontouchstart="sendCommand('stop')">刹车</button>
+        <button class="btn" onmousedown="sendCommand('d')" onmouseup="sendCommand('stop')" ontouchstart="sendCommand('d')" ontouchend="sendCommand('stop')">右转</button>
+        <button class="btn btn-ai" id="ai-btn" onclick="toggleAI()">🚀 开启 AI 跟随</button>
     </div>
     <script>
+        let isAI = false;
+        function toggleAI() {
+            isAI = !isAI;
+            const btn = document.getElementById('ai-btn');
+            if (isAI) {
+                btn.innerHTML = '🛑 停止自动跟随'; btn.style.backgroundColor = '#e74c3c';
+                fetch('/action?cmd=ai_on');
+            } else {
+                btn.innerHTML = '🚀 开启 AI 跟随'; btn.style.backgroundColor = '#9b59b6';
+                fetch('/action?cmd=ai_off');
+            }
+        }
         function sendCommand(action) {
-            fetch('/action?cmd=' + action)
-                .catch(error => console.error('发送失败:', error));
+            if (isAI && action !== 'stop') toggleAI(); 
+            fetch('/action?cmd=' + action);
         }
     </script>
 </body>
@@ -171,27 +244,19 @@ HTML_TEMPLATE = '''
 '''
 
 @app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
+def index(): return render_template_string(HTML_TEMPLATE)
 
 @app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+def video_feed(): return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/action')
 def handle_action():
-    global car_state
+    global car_state, auto_follow_mode
     cmd = request.args.get('cmd')
-    if cmd in ['w', 'a', 's', 'd', 'q', 'e', 'stop']:
-        car_state = cmd
+    if cmd == 'ai_on': auto_follow_mode = True
+    elif cmd == 'ai_off': auto_follow_mode = False; car_state = 'stop'
+    elif cmd in ['w', 'a', 's', 'd', 'q', 'e', 'stop']: car_state = cmd
     return "OK", 200
 
 if __name__ == '__main__':
-    try:
-        app.run(host='0.0.0.0', port=5000, threaded=True, debug=False)
-    finally:
-        car_state = 'stop'
-        time.sleep(0.2)
-        if ser and ser.is_open:
-            ser.close()
-            print("串口已安全关闭。")
+    app.run(host='0.0.0.0', port=5000, threaded=True, debug=False)
